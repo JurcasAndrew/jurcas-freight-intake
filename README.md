@@ -10,7 +10,9 @@ license: mit
 short_description: Logistics message analyzer with AI and export
 ---
 
-# JurcasAI Freight Intake (MVP 0.1)
+# JurcasAI Freight Intake (MVP 0.2)
+
+**Update v0.2:** Separates the latest message from quoted prior email, handles structured multi-stop unloadings, prioritizes total pallets, flags unverified ADR / missing addresses / relative quotation deadlines, and includes operational warnings in export. This is still a rules-based extractor that requires human review.
 
 **Goal:** Turn a free-text transport message into a reviewed, structured JSON / CSV record for later CRM integration.
 
@@ -27,7 +29,7 @@ short_description: Logistics message analyzer with AI and export
 
 The **optional AI classifier** uses `Xenova/multilingual-e5-small` through Transformers.js to turn a message and labelled examples into embeddings. It compares their cosine similarity and selects the best matching intent when the margin is meaningful. Cosine similarity is **not** calibrated confidence. This is a prototype, not an evaluated classifier.
 
-The **field extractor is currently rule-based**, not generative AI. It recognizes some route phrases, weights, pallets, dates and equipment types in English, Polish and Lithuanian; Russian has partial coverage. Every output requires human review. No data is sent to Bitrix24 or emailed automatically.
+The **field extractor is currently rule-based**, not generative AI. It recognizes some route phrases, labelled loading, numbered delivery stops, total pallets, weights, dates and equipment. Polish and Lithuanian have partial coverage and Russian is very limited. This does not amount to full contextual AI extraction. Every output requires human review. No data is sent to Bitrix24 or emailed automatically.
 
 ## Try it
 

@@ -69,9 +69,42 @@ function renderMissing() {
     chip.textContent = FIELD_LABELS[key]; area.appendChild(chip);
   });
 }
+function renderQuality() {
+  if (!current) return;
+  const stops = $('stop-list'); stops.replaceChildren();
+  const warnings = $('risk-list'); warnings.replaceChildren();
+  const stopsData = current.stops || [];
+  $('stop-count').textContent = `${stopsData.length} przystanki`;
+  if (!stopsData.length) {
+    const item = document.createElement('p'); item.className = 'empty-hint';
+    item.textContent = 'Brak rozpisanych punktow dostawy (dla prostych zlecen zwykle wystarczy jedno pole docelowe).';
+    stops.appendChild(item);
+  }
+  for (const stop of stopsData) {
+    const div = document.createElement('div'); div.className = 'stop-line';
+    const title = document.createElement('strong'); title.textContent = `${stop.order}. ${stop.place}`;
+    const details = document.createElement('span');
+    details.textContent = [stop.date,stop.timeWindow, stop.pallets ? `${stop.pallets} palet` : ''].filter(Boolean).join(' · ');
+    div.append(title,details); stops.appendChild(div);
+  }
+  $('cargo-type').textContent = current.cargo || 'Nie okreslono';
+  $('adr-state').textContent = ({unverified:'NIEPOTWIERDZONY',declared_adr:'Zadeklarowano ADR',declared_non_adr:'Zadeklarowano non-ADR',not_specified:'Nie podano'})[current.adrStatus] || 'Nie podano';
+  $('requirements').textContent = current.requirements?.length ? current.requirements.join(' · ') : 'Brak wychwyconych wymagan';
+  const items = current.warnings || [];
+  $('risk-count').textContent = String(items.length);
+  if (!items.length) {
+    const p = document.createElement('p'); p.className = 'empty-hint';
+    p.textContent = 'Nie wykryto dodatkowych ostrzezen. Nadal sprawdz dane ze zrodlem.';
+    warnings.appendChild(p);
+  }
+  for (const item of items) {
+    const div = document.createElement('div'); div.className = `risk-line ${item.severity}`;
+    div.textContent = item.text; warnings.appendChild(div);
+  }
+}
 function renderHistory() {
   $('metric-total').textContent = String(history.length);
-  $('metric-missing').textContent = String(history.filter(r => r.missing.length > 0).length);
+  $('metric-missing').textContent = String(history.filter(r => r.missing.length > 0 || r.warnings?.some(w=>w.severity !== 'info')).length);
   const tbody = $('history-body'); tbody.replaceChildren();
   if (!history.length) {
     const tr = document.createElement('tr'); const cell = document.createElement('td');
@@ -100,7 +133,7 @@ function render() {
   $('semantic-info').textContent = current.categoryMethod === 'ai'
     ? `Model ${modelId} wybral najblizsza kategorie. Podobienstwo kosinusowe: ${current.semanticScore?.toFixed(3) ?? '?'} (to NIE jest procent pewnosci). Potwierdz wynik.`
     : 'Wynik z regul jezykowych. Wlacz model Hugging Face, aby porownac znaczenie wiadomosci z przykladami klas.';
-  renderFields(current.fields); renderMissing();
+  renderFields(current.fields); renderMissing(); renderQuality();
   $('draft').value = buildDraft(current); renderHistory();
 }
 function cosine(a,b) {
@@ -110,7 +143,7 @@ function cosine(a,b) {
 }
 async function semanticClassification(rec) {
   if (!extractor || !prototypeVectors) return;
-  const query = await extractor('query: ' + rec.sourceText.slice(0, 1600), {pooling:'mean',normalize:true});
+  const query = await extractor('query: ' + (rec.activeText || rec.sourceText).slice(0, 1600), {pooling:'mean',normalize:true});
   const queryVector = query.tolist()[0];
   const scores = {};
   modelExamples.forEach(([category], i) => {

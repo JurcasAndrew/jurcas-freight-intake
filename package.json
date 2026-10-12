@@ -1,0 +1,10 @@
+{
+  "name": "jurcas-freight-intake",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/engine.test.mjs",
+    "check": "node --check index.js && node --check engine.js"
+  }
+}
