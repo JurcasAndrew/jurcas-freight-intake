@@ -10,11 +10,44 @@ license: mit
 short_description: Logistics message analyzer with AI and export
 ---
 
-# JurcasAI Freight Intake (MVP 0.2)
+# JurcasAI Freight Intake (MVP 0.3)
 
 **Update v0.2:** Separates the latest message from quoted prior email, handles structured multi-stop unloadings, prioritizes total pallets, flags unverified ADR / missing addresses / relative quotation deadlines, and includes operational warnings in export. This is still a rules-based extractor that requires human review.
 
 **Goal:** Turn a free-text transport message into a reviewed, structured JSON / CSV record for later CRM integration.
+
+
+## MVP 0.3 — Quality Gate
+
+Extraction is a proposal, never a human confirmation. The browser-local review panel tracks each field and unloading point as `extracted`, `confirmed`, `missing`, `conflict`, or `requires_review`. It preserves the existing visual layout and optional local Hugging Face classifier.
+
+- `engine.js`: deterministic extraction plus Quality Gate evaluation, evidence spans, manual confirmations and approval invalidation. No backend or CRM requests.
+- `index.js`: review controls and source-change guard; edited source text must be analyzed again before review or export.
+- `tests/quality-gate.test.mjs`: gate regressions; the original 13 tests in `tests/engine.test.mjs` are retained unchanged.
+- The existing deployment allowlist still contains every runtime file; no extra JavaScript module is required.
+
+### Review and readiness
+
+Use **Potwierdz** for individual values, then **Zatwierdz dane** for the record. CRM readiness currently supports RFQ records only. Every required value, extracted cargo and operational requirements, full loading/delivery address, ADR decision and its review basis must be present and confirmed. Each unloading point has separate order, place, date, pallets and time-window review (required when a window was present in the source). Destination and delivery-date summaries are derived from those points.
+
+Dates require an explicit year. A relative quotation deadline requires an ISO timestamp with timezone. Invalid quantities, inconsistent pallet totals, duplicate stop order and reversed dates block approval. Conflicting explicit source declarations require a written human resolution; arithmetic conflicts must be corrected rather than dismissed. Other natural-language contradictions may remain undetected: this is a rules-based MVP, not a guarantee of transport or regulatory compliance.
+
+Numbered stop declarations use one shared recognizer for extraction and validation: `Delivery`, `Unloading`, `Drop-off`, `Drop off`, `Dropoff`, `Rozładunek`, `Rozladunek`, and `Pristatymas` (case-insensitive). Expected stop counts come from the current source message, including empty headers; deleting a stop or moving its pallets cannot hide that obligation. Empty/placeholder stops, duplicate or missing numbers, and contradictory count declarations block approval until the source is clarified and analyzed again. Source edits clear all confirmations; adding/removing/reordering stops or changing their places clears stop/address confirmations and record approval. Source evidence and required time windows are matched by stop number, not array position.
+
+Regression coverage in `tests/numbered-stops.test.mjs` calls the engine and JSON export directly, without relying on disabled UI buttons. The original 37 tests remain unchanged.
+
+Evidence contains exact text and offsets relative to `active_message`. Quoted historical mail is excluded. Manual values or ambiguous matches have no invented source quotation. Confirmation records have timestamps and optional resolution notes, but no authenticated reviewer identity: this is a local session record, not a signed audit trail. Refreshing the page clears it.
+
+### Test the two-unloading email
+
+1. Run `python -m http.server 8000` in this repository and open `http://localhost:8000`.
+2. Select **Stress test** and find **Weryfikacja danych**. Hamburg and Bremen are reviewed independently; ADR remains unresolved and **Zatwierdz dane** is disabled.
+3. Check source quotes and the 12 + 6 = 18 pallet total. The email does not provide complete addresses or years for the delivery dates. Obtain these details from a follow-up before using the record operationally.
+4. For a synthetic demonstration only, enter delivery dates `2026-10-19` and `2026-10-20`, fictional full addresses, and an explicitly fictional review basis for a selected ADR classification. This example does not establish the actual ADR status of lithium batteries. Set a test quotation deadline such as `2026-10-13T10:00+03:00` only as a fixture; the app does not infer the sender's date or timezone.
+5. Confirm each required field (including the optional time windows when present), then click **Zatwierdz dane**. Editing any value invalidates record approval. Changing a route also invalidates the related address confirmation.
+6. Export JSON before and after approval. Inspect `verification`, its `entries` and `issues`, `ready_for_crm`, `human_review_required`, and `freight.review_details`. A draft can be exported for review but has `ready_for_crm: false`. CSV includes the same gate state.
+
+The application version is 0.3.0. The additive export retains `schema: jurcasai.freight-intake.v0.2` for compatibility with the existing contract/tests and declares `app_version: 0.3.0` and `verification.version: 0.3`. Original ADR extraction and warnings remain available; the manually verified classification is exported separately. This does not configure Bitrix24 mapping or send anything to CRM.
 
 ## Architecture
 
