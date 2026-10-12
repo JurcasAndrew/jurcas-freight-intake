@@ -12,3 +12,54 @@ jobs:
           node-version: '22'
       - run: npm run check
       - run: npm test
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: huggingface-space-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install Hugging Face Hub
+        run: python -m pip install "huggingface_hub==2.2.0"
+      - name: Deploy to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          from huggingface_hub import HfApi
+
+          token = os.environ.get("HF_TOKEN")
+          if not token:
+              raise RuntimeError("GitHub Actions secret HF_TOKEN is missing or empty.")
+
+          files = [
+              "README.md",
+              "index.html",
+              "index.js",
+              "engine.js",
+              "style.css",
+          ]
+          for filename in files:
+              if not Path(filename).is_file():
+                  raise FileNotFoundError(f"Required deployment file is missing: {filename}")
+
+          HfApi(token=token).upload_folder(
+              repo_id="jurcaswork/jurcas-freight-intake",
+              repo_type="space",
+              folder_path=".",
+              allow_patterns=files,
+              # No delete_patterns: keep other files already present in the Space.
+              commit_message=f"Deploy GitHub commit {os.environ['GITHUB_SHA']}",
+          )
+          PY
