@@ -1,4 +1,4 @@
-import { SAMPLES, CATEGORY, FIELD_LABELS, analyze, setCategory, calcMissing, buildDraft, asPayload, asCSV } from './engine.js';
+import { SAMPLES, CATEGORY, FIELD_LABELS, analyze, setCategory, calcMissing, buildDraft, asPayload, asCSV, qualityGate, editQualityValue, confirmQualityItem, approveRecord, invalidateSourceReview, addDeliveryStop, removeDeliveryStop } from './engine.js';
 
 const $ = id => document.getElementById(id);
 const modelId = 'Xenova/multilingual-e5-small';
@@ -27,6 +27,101 @@ const modelExamples = [
 let extractor = null, prototypeVectors = null, aiLoading = false, current = null, history = [], busy = false;
 let toastTimeout = null;
 
+let sourceDirty = false;
+const reviewRows = new Map();
+function refreshReview() {
+  if (!current) return;
+  const gate=qualityGate(current);
+  $('review-status').textContent=gate.status;
+  $('review-status').className='review-badge '+gate.status;
+  $('review-summary').textContent=sourceDirty
+    ? 'Zmieniono e-mail. Kliknij Analizuj wiadomosc, aby sprawdzic aktualna tresc.'
+    : gate.ready_for_crm ? 'Dane zatwierdzone — gotowe do CRM. Nic nie zostalo wyslane.'
+    : `${gate.entries.filter(x=>x.status==='confirmed').length} / ${gate.entries.length} pol potwierdzonych. Problemy blokujace: ${gate.issues.length}.`;
+  $('review-summary').className='risk-line '+(gate.ready_for_crm&&!sourceDirty?'review-ok':'high');
+  $('adr-warning').hidden=!gate.adr_review_required;
+  $('adr-warning').textContent='ADR NIEPOTWIERDZONE. Zweryfikuj klasyfikacje z uprawniona osoba i dokumentacja MSDS/SDS. Wpisz wynik oraz podstawe ustalenia; samo wykrycie non-ADR w e-mailu nie wystarcza.';
+  $('approve-data').disabled=sourceDirty || !gate.can_approve || gate.ready_for_crm;
+  $('approve-data').textContent=gate.ready_for_crm?'Dane zatwierdzone':'Zatwierdz dane';
+  $('add-stop').disabled=sourceDirty;
+  for (const id of ['export-json','export-csv']) $(id).disabled=sourceDirty;
+  for (const el of document.querySelectorAll('[data-field]')) {
+    el.readOnly=!!current.stops.length && ['destination','deliveryDate'].includes(el.dataset.field);
+    el.disabled=sourceDirty;
+    el.title=el.readOnly?'Podsumowanie punktow. Edytuj osobne rozladunki w Quality Gate.':'';
+  }
+  $('review-issues').replaceChildren();
+  $('issue-summary').textContent=`Problemy blokujace (${gate.issues.length})`;
+  for (const issue of gate.issues) {
+    const li=document.createElement('li'); li.textContent=issue.message; $('review-issues').append(li);
+  }
+  for (const item of gate.entries) {
+    const row=reviewRows.get(item.id); if (!row) continue;
+    row.badge.textContent=item.status; row.badge.className='review-badge '+item.status;
+    if (document.activeElement!==row.input) row.input.value=item.value;
+    row.input.disabled=sourceDirty || !!item.derived;
+    row.button.disabled=sourceDirty || !item.value || item.status==='confirmed' || !!item.derived;
+    row.button.textContent=item.status==='confirmed'?'Potwierdzone':'Potwierdz';
+    row.button.hidden=!!item.derived;
+    row.source.textContent=item.derived?'Wyliczone z osobnych rozladunkow — potwierdz kazdy punkt.'
+      : item.source ? 'Zrodlo: '+item.source.text : 'Brak jednoznacznego cytatu dla tej wartosci. Wymagana reczna weryfikacja.';
+    row.note.hidden=!item.source_conflict;
+    row.note.disabled=sourceDirty;
+    row.conflict.textContent=item.source_conflict ? 'Sprzeczne deklaracje: '+item.source_conflict.join(' / ')+'. Opisz wybor poprawnej wartosci.' : '';
+  }
+}
+function afterReviewEdit() {
+  renderFields(current.fields); renderMissing(); renderQuality(); refreshReview(); renderHistory();
+  $('draft').value=buildDraft(current);
+}
+function renderReview() {
+  const area=$('review-groups'); area.replaceChildren(); reviewRows.clear();
+  const groups=new Map();
+  for (const item of qualityGate(current).entries) {
+    if (!groups.has(item.group)) {
+      const group=document.createElement('details'); group.className='review-group'; group.open=true;
+      const summary=document.createElement('summary'); summary.textContent=item.group;
+      group.append(summary); area.append(group); groups.set(item.group,group);
+    }
+    const row=document.createElement('div'); row.className='review-row';
+    const label=document.createElement('label'); label.htmlFor='review-input-'+item.id;
+    label.textContent=item.label+(item.required?'':' (opcjonalne)');
+    const badge=document.createElement('span');
+    const heading=document.createElement('div'); heading.className='review-row-heading'; heading.append(label,badge);
+    const input=document.createElement(item.choices?'select':'input'); input.id='review-input-'+item.id;
+    if (item.choices) {
+      const option=document.createElement('option'); option.value=''; option.textContent='Wybierz po weryfikacji'; input.append(option);
+      for (const [value,text] of item.choices) { const option=document.createElement('option'); option.value=value; option.textContent=text; input.append(option); }
+    } else { input.type='text'; input.placeholder=item.id==='deadline'?'2026-10-13T10:00+03:00':'Uzupelnij dane'; }
+    input.value=item.value;
+    input.addEventListener(item.choices?'change':'input',()=>{
+      if(sourceDirty)return;
+      try { editQualityValue(current,item.id,input.value); afterReviewEdit(); } catch(err) {toast(err.message);}
+    });
+    const source=document.createElement('p'); source.className='source-snippet';
+    const conflict=document.createElement('p'); conflict.className='review-conflict';
+    const note=document.createElement('input'); note.type='text'; note.placeholder='Dlaczego ta wartosc jest poprawna?';
+    note.setAttribute('aria-label','Rozstrzygniecie: '+item.label);
+    const button=document.createElement('button'); button.type='button'; button.className='button secondary confirm-field';
+    button.setAttribute('aria-label','Potwierdz: '+item.group+' — '+item.label);
+    button.addEventListener('click',()=>{
+      if(sourceDirty)return;
+      try {confirmQualityItem(current,item.id,note.value);afterReviewEdit();} catch(err){toast(err.message);}
+    });
+    row.append(heading,input,source,conflict,note,button);
+    groups.get(item.group).append(row);
+    reviewRows.set(item.id,{input,badge,source,note,button,conflict});
+  }
+  current.stops.forEach((stop,index)=>{
+    const button=document.createElement('button');button.className='button ghost';button.type='button';
+    button.textContent='Usun punkt '+(index+1);
+    button.addEventListener('click',()=>{if(!sourceDirty){removeDeliveryStop(current,index);render();}});
+    groups.get('Rozladunek '+(index+1)).append(button);
+  });
+  refreshReview();
+}
+
+
 function toast(message) {
   $('toast').textContent = message;
   $('toast').classList.add('show');
@@ -49,7 +144,7 @@ function setAiStatus(message, level = '') {
 function renderFields(fields) {
   Object.entries(fields).forEach(([key, value]) => {
     const el = $(`field-${key}`);
-    if (el) el.value = value || '';
+    if (el && document.activeElement !== el) el.value = value || '';
   });
 }
 function renderMissing() {
@@ -104,7 +199,7 @@ function renderQuality() {
 }
 function renderHistory() {
   $('metric-total').textContent = String(history.length);
-  $('metric-missing').textContent = String(history.filter(r => r.missing.length > 0 || r.warnings?.some(w=>w.severity !== 'info')).length);
+  $('metric-missing').textContent = String(history.filter(r => !qualityGate(r).ready_for_crm).length);
   const tbody = $('history-body'); tbody.replaceChildren();
   if (!history.length) {
     const tr = document.createElement('tr'); const cell = document.createElement('td');
@@ -127,13 +222,13 @@ function render() {
   if (!current) return;
   $('category').textContent = CATEGORY[current.categoryId];
   $('reason').textContent = current.reason;
-  $('method').textContent = current.categoryMethod === 'ai' ? 'HUGGING FACE AI' : 'REGULY';
+  $('method').textContent = current.categoryMethod === 'ai' ? 'HUGGING FACE AI' : current.categoryMethod === 'manual' ? 'RECZNIE' : 'REGULY';
   $('priority').textContent = current.priority === 'high' ? '● PILNE' : current.priority === 'mid' ? '● NORMALNE' : '● NISKIE';
   $('priority').className = `priority ${current.priority}`;
   $('semantic-info').textContent = current.categoryMethod === 'ai'
     ? `Model ${modelId} wybral najblizsza kategorie. Podobienstwo kosinusowe: ${current.semanticScore?.toFixed(3) ?? '?'} (to NIE jest procent pewnosci). Potwierdz wynik.`
     : 'Wynik z regul jezykowych. Wlacz model Hugging Face, aby porownac znaczenie wiadomosci z przykladami klas.';
-  renderFields(current.fields); renderMissing(); renderQuality();
+  renderFields(current.fields); renderMissing(); renderQuality(); renderReview();
   $('draft').value = buildDraft(current); renderHistory();
 }
 function cosine(a,b) {
@@ -167,7 +262,7 @@ async function analyzeCurrent() {
   try {
     busy = true; $('analyze').disabled = true;
     const rec = analyze($('message').value);
-    current = rec; history.unshift(rec); if (history.length > 30) history.pop(); render();
+    sourceDirty = false; current = rec; history.unshift(rec); if (history.length > 30) history.pop(); render();
     if (extractor) {
       $('semantic-info').textContent = 'Trwa klasyfikacja semantyczna...';
       try { await semanticClassification(rec); } catch (err) { toast('Blad modelu AI. Wynik regul pozostaje dostepny.'); console.warn(err); }
@@ -212,28 +307,32 @@ for (const b of document.querySelectorAll('[data-sample]')) b.addEventListener('
 $('message').addEventListener('input', () => {
   $('char-count').textContent = `${$('message').value.length} znakow`;
   document.querySelectorAll('.sample').forEach(b => b.classList.remove('active'));
+  if (current) { sourceDirty = $('message').value.trim() !== current.sourceText; invalidateSourceReview(current); refreshReview(); }
 });
 $('analyze').addEventListener('click', analyzeCurrent);
 $('load-ai').addEventListener('click', loadAI);
-for (const el of document.querySelectorAll('[data-field]')) el.addEventListener('change', () => {
-  if (!current) return;
-  current.fields[el.dataset.field] = el.value.trim();
-  current.missing = calcMissing(current.fields, current.categoryId);
-  current.reviewed = false;
-  renderMissing(); $('draft').value = buildDraft(current); renderHistory();
+for (const el of document.querySelectorAll('[data-field]')) el.addEventListener('input', () => {
+  if (!current || sourceDirty) return;
+  try { editQualityValue(current,'field.'+el.dataset.field,el.value); afterReviewEdit(); } catch(err){toast(err.message);}
 });
 $('copy-draft').addEventListener('click', () => copyText($('draft').value));
 $('export-json').addEventListener('click', () => {
   if (!current) return toast('Najpierw przeanalizuj wiadomosc');
   download('freight-intake.json',JSON.stringify(asPayload(current), null, 2),'application/json;charset=utf-8');
-  toast('Eksport JSON gotowy. Wymagana reczna weryfikacja.');
+  toast(qualityGate(current).ready_for_crm ? 'JSON: dane zatwierdzone, bez wysylki do CRM.' : 'JSON: wersja robocza z problemami do weryfikacji.');
 });
 $('export-csv').addEventListener('click', () => {
   if (!current) return toast('Najpierw przeanalizuj wiadomosc');
   download('freight-intake.csv',asCSV(current),'text/csv;charset=utf-8');
-  toast('Eksport CSV gotowy. Wymagana reczna weryfikacja.');
+  toast(qualityGate(current).ready_for_crm ? 'CSV: dane zatwierdzone, bez wysylki do CRM.' : 'CSV: wersja robocza z problemami do weryfikacji.');
 });
 $('clear-history').addEventListener('click', () => {
   history = []; renderHistory(); toast('Historia tej sesji wyczyszczona');
 });
+$('approve-data').addEventListener('click',()=>{
+  if (!current || sourceDirty) return;
+  const result=approveRecord(current); refreshReview(); renderHistory();
+  toast(result.ok?'Dane zatwierdzone. Nic nie zostalo wyslane do CRM.':'Najpierw usun problemy i potwierdz pola.');
+});
+$('add-stop').addEventListener('click',()=>{if(current&&!sourceDirty){addDeliveryStop(current);render();}});
 chooseSample('rfq');
